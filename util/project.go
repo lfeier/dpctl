@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/lfeier/dpctl/log"
 )
 
 // Package metadata and the source directory
@@ -148,8 +150,8 @@ func FilterPackages(pkgs PackageSlice, tags []string) PackageSlice {
 }
 
 // ObjectQName returns a qualified name: objclass/objname
-func ObjectQName(cls string, obj interface{}) string {
-	return fmt.Sprintf("%s/%s", cls, JSONValue(obj, "name").(string))
+func ObjectQName(cls string, name string) string {
+	return fmt.Sprintf("%s/%s", cls, name)
 }
 
 // GetObjectPackage returns the package where the object is saved
@@ -176,7 +178,6 @@ func GetObjectPackage(pkgs PackageSlice, qname string) (*Package, error) {
 	return nil, nil
 }
 
-
 // GetFilePackage returns the package where the file is saved
 func GetFilePackage(pkgs PackageSlice, path string) (*Package, error) {
 	for _, pkg := range pkgs {
@@ -202,41 +203,251 @@ func GetFilePackage(pkgs PackageSlice, path string) (*Package, error) {
 }
 
 // SaveObject writes the configuration object to a file
-func SaveObject(pkgDir string, cls string, obj interface{}) (string, error) {
-	qn := ObjectQName(cls, obj)
+func SaveObject(pkgDir string, qname string, obj interface{}) (string, bool, error) {
+	new := false
 
 	p, err := filepath.Abs(pkgDir)
 	if err != nil {
-		return "", err
+		return "", new, err
 	}
 
-	f := filepath.Join(p, "objects", fmt.Sprintf("%s.json", qn))
+	f := filepath.Join(p, "objects", fmt.Sprintf("%s.json", qname))
 	if err := os.MkdirAll(filepath.Dir(f), 0777); err != nil {
-		return "", err
+		return "", new, err
+	}
+
+	_, err = os.Stat(f)
+	if err != nil {
+		if os.IsNotExist(err) {
+			new = true
+		} else {
+			return "", new, err
+		}
 	}
 
 	if err := WriteDataToFile(obj, f); err != nil {
-		return "", err
+		return "", new, err
 	}
 
-	return f, nil
+	return f, new, nil
 }
 
 // SaveFile writes the configuration file
-func SaveFile(pkgDir string, path string, data []byte) (string, error) {
+func SaveFile(pkgDir string, path string, data []byte) (string, bool, error) {
+	new := false
+
 	p, err := filepath.Abs(pkgDir)
 	if err != nil {
-		return "", err
+		return "", new, err
 	}
 
 	f := filepath.Join(p, "files", path)
 	if err := os.MkdirAll(filepath.Dir(f), 0777); err != nil {
-		return "", err
+		return "", new, err
+	}
+
+	_, err = os.Stat(f)
+	if err != nil {
+		if os.IsNotExist(err) {
+			new = true
+		} else {
+			return "", new, err
+		}
 	}
 
 	if err := ioutil.WriteFile(f, data, 0644); err != nil {
-		return "", err
+		return "", new, err
 	}
 
-	return f, nil
+	return f, new, nil
+}
+
+// ObjectInfo describes a project object
+type ObjectInfo struct {
+	Name    string
+	Class   string
+	QName   string
+	Package *Package
+	File    string
+}
+
+// GetProjectObjects returns the project objects for the selected packages
+func GetProjectObjects(pkgs PackageSlice) ([]*ObjectInfo, error) {
+	pkgs.Sort()
+
+	m := make(map[string]*ObjectInfo)
+
+	var objectsDir string
+	var cls string
+	var pkg *Package
+	var objInfo *ObjectInfo
+
+	walkFn := func(path string, info os.FileInfo, err error) error {
+		if info.IsDir() {
+			if IsHidden(path) {
+				return filepath.SkipDir
+			}
+
+			if path == objectsDir {
+				return nil
+			}
+
+			if filepath.Dir(path) != objectsDir {
+				return fmt.Errorf("unexpected package directory: %v", path)
+			}
+
+			cls = info.Name()
+
+			return nil
+		}
+
+		if IsHidden(path) {
+			return nil
+		}
+
+		if filepath.Dir(path) == objectsDir {
+			return fmt.Errorf("unexpected package file: %v", path)
+		}
+
+		n := filepath.Base(path)
+
+		if filepath.Ext(n) != ".json" {
+			return fmt.Errorf("object file must have the 'json' extension: %v", path)
+		}
+
+		objInfo = &ObjectInfo{
+			Name:    n[0 : len(n)-5],
+			Class:   cls,
+			Package: pkg,
+			File:    path,
+		}
+
+		objInfo.QName = ObjectQName(objInfo.Class, objInfo.Name)
+
+		if _, ok := m[objInfo.QName]; !ok {
+			m[objInfo.QName] = objInfo
+		} else {
+			log.DbgLogger4.Printf("package object ignored: %s [%s]", objInfo.QName, objInfo.Package.Name)
+		}
+
+		return nil
+	}
+
+	for _, pkg = range pkgs {
+		objectsDir = filepath.Join(pkg.Dir, "objects")
+
+		fs, err := os.Stat(objectsDir)
+		if err != nil && os.IsNotExist(err) {
+			continue
+		}
+		if !fs.IsDir() {
+			return nil, fmt.Errorf("not a directory: %s", objectsDir)
+		}
+
+		if err := filepath.Walk(objectsDir, walkFn); err != nil {
+			return nil, err
+		}
+	}
+
+	objects := make([]*ObjectInfo, 0, len(m))
+
+	for _, objInfo := range m {
+		objects = append(objects, objInfo)
+	}
+
+	return objects, nil
+}
+
+// FileInfo describes a project object
+type FileInfo struct {
+	Path    string
+	Package *Package
+	File    string
+}
+
+// GetProjectFiles returns the project files for the selected packages
+func GetProjectFiles(pkgs PackageSlice) ([]*FileInfo, error) {
+	pkgs.Sort()
+
+	m := make(map[string]*FileInfo)
+
+	var filesDir string
+	var pkg *Package
+	var fileInfo *FileInfo
+
+	walkFn := func(path string, info os.FileInfo, err error) error {
+		if info.IsDir() {
+			if IsHidden(path) {
+				return filepath.SkipDir
+			}
+
+			if path == filesDir {
+				return nil
+			}
+
+			return nil
+		}
+
+		if IsHidden(path) {
+			return nil
+		}
+
+		if filepath.Dir(path) == filesDir {
+			return fmt.Errorf("unexpected package file: %v", path)
+		}
+
+		rel, err := filepath.Rel(filesDir, path)
+		if err != nil {
+			return err
+		}
+
+		fileInfo = &FileInfo{
+			Path:    rel,
+			Package: pkg,
+			File:    path,
+		}
+
+		if _, ok := m[rel]; !ok {
+			m[rel] = fileInfo
+		} else {
+			log.DbgLogger4.Printf("package file ignored: %s [%s]", path, fileInfo.Package.Name)
+		}
+
+		return nil
+	}
+
+	for _, pkg = range pkgs {
+		filesDir = filepath.Join(pkg.Dir, "files")
+
+		fs, err := os.Stat(filesDir)
+		if err != nil && os.IsNotExist(err) {
+			continue
+		}
+		if !fs.IsDir() {
+			return nil, fmt.Errorf("not a directory: %s", filesDir)
+		}
+
+		if err := filepath.Walk(filesDir, walkFn); err != nil {
+			return nil, err
+		}
+	}
+
+	files := make([]*FileInfo, 0, len(m))
+
+	for _, fileInfo := range m {
+		files = append(files, fileInfo)
+	}
+
+	return files, nil
+}
+
+// IsHidden return true for a hidden file or directory, false otherwise
+func IsHidden(path string) bool {
+	if filepath.Base(path)[0:1] == "." {
+		return true
+	}
+
+	// TODO: Update to handle hidden Windows files and directories
+
+	return false
 }

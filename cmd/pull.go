@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/lfeier/dpctl/log"
 	"github.com/lfeier/dpctl/util"
@@ -29,11 +30,11 @@ import (
 
 func init() {
 	var scmd = &cobra.Command{
-		Use:     "pull",
-		Short:   "Pull DataPower configuration objects and files",
-		Long:    ``,
-		PreRunE: preRunPull,
-		RunE:    runPull,
+		Use:    "pull",
+		Short:  "Pull DataPower configuration objects and files",
+		Long:   ``,
+		PreRun: preRunPull,
+		Run:    runPull,
 	}
 
 	CmdRoot.AddCommand(scmd)
@@ -52,67 +53,71 @@ func init() {
 	addIgnoreFilesFlag(scmd)
 }
 
-func preRunPull(cmd *cobra.Command, args []string) error {
+func preRunPull(cmd *cobra.Command, args []string) {
 	level, _ := getVerboseFlagValue(cmd)
 	log.SetVebosity(level)
-
-	return nil
 }
 
-func runPull(cmd *cobra.Command, args []string) error {
+func runPull(cmd *cobra.Command, args []string) {
+	if err := runPullE(cmd, args); err != nil {
+		log.ErrLogger.Println("Error:", err.Error())
+	}
+}
+
+func runPullE(cmd *cobra.Command, args []string) error {
 	dpRestMgmtURL, _ := getDPRestMgmtURLFlagValue(cmd)
-	log.DbgLogger2.Printf("--dp-rest-mgmt-url=%v", dpRestMgmtURL)
+	log.DbgLogger1.Printf("--dp-rest-mgmt-url=%v", dpRestMgmtURL)
 
 	dpUserName, _ := getDPUserNameFlagValue(cmd)
-	log.DbgLogger2.Printf("--dp-user-name=%v", dpUserName)
+	log.DbgLogger1.Printf("--dp-user-name=%v", dpUserName)
 
 	dpUserPassword, _ := getDPUserPasswordFlagValue(cmd)
-	log.DbgLogger2.Printf("--dp-user-password=%v", "********")
+	log.DbgLogger1.Printf("--dp-user-password=%v", "********")
 
 	domain, _ := getDomainFlagValue(cmd)
-	log.DbgLogger2.Printf("--domain=%v", domain)
+	log.DbgLogger1.Printf("--domain=%v", domain)
 
 	httpTimeout, _ := getHTTPTimeoutFlagValue(cmd)
-	log.DbgLogger2.Printf("--http-timeout=%v", httpTimeout)
+	log.DbgLogger1.Printf("--http-timeout=%v", httpTimeout)
 
 	projectDir, _ := getProjectDirFlagValue(cmd)
-	log.DbgLogger2.Printf("--project-dir=%v", projectDir)
+	log.DbgLogger1.Printf("--project-dir=%v", projectDir)
 
 	pkgTags, _ := getPkgTagsValue(cmd)
-	log.DbgLogger2.Printf("--pkg-tags=%v", pkgTags)
+	log.DbgLogger1.Printf("--pkg-tags=%v", pkgTags)
 
 	objects, _ := getObjectsFlagValue(cmd)
-	log.DbgLogger2.Printf("--objects=%v", objects)
+	log.DbgLogger1.Printf("--objects=%v", objects)
 
 	files, _ := getFilesFlagValue(cmd)
-	log.DbgLogger2.Printf("--files=%v", files)
+	log.DbgLogger1.Printf("--files=%v", files)
 
 	ignoreObjects, _ := getIgnoreObjectsFlagValue(cmd)
-	log.DbgLogger2.Printf("--ignore-objects=%v", ignoreObjects)
+	log.DbgLogger1.Printf("--ignore-objects=%v", ignoreObjects)
 
 	ignoreFiles, _ := getIgnoreFilesFlagValue(cmd)
-	log.DbgLogger2.Printf("--ignore-files=%v", ignoreFiles)
+	log.DbgLogger1.Printf("--ignore-files=%v", ignoreFiles)
 
 	reObjects := regexp.MustCompile(strings.Join(objects, "|"))
-	log.DbgLogger3.Println("objects regexp:", reObjects.String())
+	log.DbgLogger4.Println("objects regexp:", reObjects.String())
 
 	reFiles := regexp.MustCompile(strings.Join(files, "|"))
-	log.DbgLogger3.Println("files regexp:", reFiles.String())
+	log.DbgLogger4.Println("files regexp:", reFiles.String())
 
 	reIgnoreObjects := regexp.MustCompile(strings.Join(ignoreObjects, "|"))
-	log.DbgLogger3.Println("ignore objects regexp:", reIgnoreObjects.String())
+	log.DbgLogger4.Println("ignore objects regexp:", reIgnoreObjects.String())
 
 	reIgnoreFiles := regexp.MustCompile(strings.Join(ignoreFiles, "|"))
-	log.DbgLogger3.Println("ignore files regexp:", reIgnoreFiles.String())
+	log.DbgLogger4.Println("ignore files regexp:", reIgnoreFiles.String())
 
 	allPackages, err := util.ProjectPackages(projectDir)
 	if err != nil {
 		return err
 	}
 
-	log.DbgLogger3.Println("all project packages:")
+	log.DbgLogger4.Println("all project packages:")
 	for _, pkg := range allPackages {
-		log.DbgLogger3.Println("  ", *pkg)
+		log.DbgLogger4.Println("  ", *pkg)
 	}
 
 	pkgs := util.FilterPackages(allPackages, pkgTags)
@@ -120,91 +125,75 @@ func runPull(cmd *cobra.Command, args []string) error {
 		return errors.New("no packages selected")
 	}
 
-	log.DbgLogger3.Println("project packages selected:")
+	log.DbgLogger1.Println("packages selected:")
 	for _, pkg := range pkgs {
-		log.DbgLogger3.Println("  ", *pkg)
+		log.DbgLogger1.Printf("  package: %s (priority %d)", pkg.Name, pkg.Priority)
 	}
 
 	httpClient := util.CreateHTTPClient(httpTimeout)
 
-	if err := pullObjects(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reObjects, reIgnoreObjects, pkgs); err != nil {
-		return err
+	err1 := pullFiles(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reFiles, reIgnoreFiles, pkgs)
+
+	err2 := pullObjects(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reObjects, reIgnoreObjects, pkgs)
+
+	if err1 != nil && err2 != nil {
+		return fmt.Errorf("%s, %s", err1.Error(), err2.Error())
 	}
 
-	if err := pullFiles(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reFiles, reIgnoreFiles, pkgs); err != nil {
-		return err
+	if err1 != nil {
+		return err1
 	}
 
-	return nil
-}
-
-func pullObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, reObjects, reIgnoreObjects *regexp.Regexp, pkgs util.PackageSlice) error {
-	classes, err := util.GetObjectClasses(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword)
-	if err != nil {
-		return err
-	}
-
-	for _, cls := range classes {
-		objects, err := util.GetObjects(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, cls)
-		if err != nil {
-			return err
-		}
-
-		for _, obj := range objects {
-			qn := util.ObjectQName(cls, obj)
-
-			if !reObjects.MatchString(qn) || reIgnoreObjects.MatchString(qn) {
-				log.DbgLogger1.Println("Object ignored:", qn)
-				continue
-			}
-
-			deleteLinks(obj.(util.GenericMap))
-
-			pkg, err := util.GetObjectPackage(pkgs, qn)
-			if err != nil {
-				return err
-			}
-
-			if pkg == nil {
-				pkg = pkgs[0]
-			}
-
-			f, err := util.SaveObject(pkg.Dir, cls, obj)
-			if err != nil {
-				return err
-			}
-
-			log.OutLogger.Println("Object saved:", f)
-		}
+	if err2 != nil {
+		return err2
 	}
 
 	return nil
 }
+
+type pullResult int
+
+const (
+	pullError pullResult = iota
+	pullOK
+	pullNew
+	pullSuccess
+	pullDryRun
+)
+
+func (result *pullResult) String() string {
+	names := [...]string{
+		"ERROR",
+		"OK",
+		"NEW",
+		"SUCCESS",
+		"DRYRUN",
+	}
+
+	return names[*result]
+}
+
+var maxPullResultLength = 7
+
+type logPullFile func(fileInfo *util.FileInfo, result *pullResult, start time.Time)
+type logPullObject func(objectInfo *util.ObjectInfo, result *pullResult, start time.Time)
 
 func pullFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, reFiles, reIgnoreFiles *regexp.Regexp, pkgs util.PackageSlice) error {
-	stores, err := util.GetFileStores(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain)
-	if err != nil {
-		return err
-	}
-
 	walkDir := func(path string) error {
 		if reIgnoreFiles.MatchString(path) || reIgnoreFiles.MatchString(fmt.Sprintf("%s/", path)) {
-			log.DbgLogger1.Println("Directory ignored:", path)
+			log.DbgLogger2.Println("directory ignored:", path)
 			return util.ErrSkipDir
 		}
 
 		return nil
 	}
 
+	var files []*util.FileInfo
+	maxPathLength := 0
+	maxPkgLength := 0
 	walkFile := func(path string, modified string, size uint) error {
 		if !reFiles.MatchString(path) || reIgnoreFiles.MatchString(path) {
-			log.DbgLogger1.Println("File ignored:", path)
-			return nil
-		}
-
-		data, err := util.GetFile(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, path)
-		if err != nil {
-			log.ErrLogger.Println("Failed to retrive file:", path, err)
+			log.DbgLogger2.Println("file ignored:", path)
 			return nil
 		}
 
@@ -217,19 +206,32 @@ func pullFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswor
 			pkg = pkgs[0]
 		}
 
-		f, err := util.SaveFile(pkg.Dir, path, data)
-		if err != nil {
-			return err
+		fileInfo := &util.FileInfo{
+			Path:    path,
+			Package: pkg,
 		}
 
-		log.OutLogger.Println("File saved:", f)
+		files = append(files, fileInfo)
+
+		if maxPathLength < len(path) {
+			maxPathLength = len(path)
+		}
+
+		if maxPkgLength < len(pkg.Name) {
+			maxPkgLength = len(pkg.Name)
+		}
 
 		return nil
 	}
 
+	stores, err := util.GetFileStores(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain)
+	if err != nil {
+		return err
+	}
+
 	for _, store := range stores {
 		if store == "cert" || store == "sharedcert" || store == "pubcert" {
-			log.DbgLogger1.Println("Store ignored:", store)
+			log.DbgLogger2.Println("store ignored:", store)
 			continue
 		}
 
@@ -237,6 +239,143 @@ func pullFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswor
 		if err != nil {
 			return err
 		}
+	}
+
+	logFn := func(fileInfo *util.FileInfo, result *pullResult, start time.Time) {
+		elapsed := time.Since(start)
+		lf := fmt.Sprintf("FILE: %%-%ds [%%s] %%%ds [%%s]", maxPathLength, maxPkgLength+maxPullResultLength-len(fileInfo.Package.Name))
+		log.OutLogger.Printf(lf, fileInfo.Path, fileInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
+	}
+
+	errCount := 0
+	for _, fileInfo := range files {
+		if err := pullFile(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, fileInfo, logFn); err != nil {
+			log.ErrLogger.Println("Error:", err.Error())
+			errCount++
+		}
+	}
+
+	if errCount > 0 {
+		return fmt.Errorf("failed to pull %d files", errCount)
+	}
+
+	return nil
+}
+
+func pullFile(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, fileInfo *util.FileInfo, logFn logPullFile) error {
+	result := pullError
+	defer logFn(fileInfo, &result, time.Now())
+
+	data, err := util.GetFile(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, fileInfo.Path)
+	if err != nil {
+		return err
+	}
+
+	f, new, err := util.SaveFile(fileInfo.Package.Dir, fileInfo.Path, data)
+	if err != nil {
+		return err
+	}
+
+	log.DbgLogger4.Println("file local path:", f)
+
+	if new {
+		result = pullNew
+	} else {
+		result = pullOK
+	}
+
+	return nil
+}
+
+func pullObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, reObjects, reIgnoreObjects *regexp.Regexp, pkgs util.PackageSlice) error {
+	res, err := util.GetStatus(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, "ObjectStatus")
+	if err != nil {
+		return err
+	}
+
+	var objects []*util.ObjectInfo
+	maxQNameLength := 0
+	maxPkgLength := 0
+	for _, objStatus := range util.JSONValue(res, "ObjectStatus").([]interface{}) {
+		name := util.JSONValue(objStatus, "Name").(string)
+		cls := util.JSONValue(objStatus, "Class").(string)
+		qn := util.ObjectQName(cls, name)
+
+		if !reObjects.MatchString(qn) || reIgnoreObjects.MatchString(qn) {
+			log.DbgLogger2.Println("object ignored:", qn)
+			continue
+		}
+
+		pkg, err := util.GetObjectPackage(pkgs, qn)
+		if err != nil {
+			return err
+		}
+
+		if pkg == nil {
+			pkg = pkgs[0]
+		}
+
+		objInfo := &util.ObjectInfo{
+			Name:    name,
+			Class:   cls,
+			QName:   qn,
+			Package: pkg,
+		}
+
+		objects = append(objects, objInfo)
+
+		if maxQNameLength < len(qn) {
+			maxQNameLength = len(qn)
+		}
+
+		if maxPkgLength < len(pkg.Name) {
+			maxPkgLength = len(pkg.Name)
+		}
+	}
+
+	logFn := func(objInfo *util.ObjectInfo, result *pullResult, start time.Time) {
+		elapsed := time.Since(start)
+		lf := fmt.Sprintf("OBJECT: %%-%ds [%%s] %%%ds [%%s]", maxQNameLength, maxPkgLength+maxPullResultLength-len(objInfo.Package.Name))
+		log.OutLogger.Printf(lf, objInfo.QName, objInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
+	}
+
+	errCount := 0
+	for _, objInfo := range objects {
+		if err := pullObject(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, objInfo, logFn); err != nil {
+			log.ErrLogger.Println("Error:", err.Error())
+			errCount++
+		}
+	}
+
+	if errCount > 0 {
+		return fmt.Errorf("failed to pull %d objects", errCount)
+	}
+
+	return nil
+}
+
+func pullObject(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, objInfo *util.ObjectInfo, logFn logPullObject) error {
+	result := pullError
+	defer logFn(objInfo, &result, time.Now())
+
+	obj, err := util.GetObject(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, objInfo.Class, objInfo.Name)
+	if err != nil {
+		return err
+	}
+
+	deleteLinks(obj.(util.GenericMap))
+
+	f, new, err := util.SaveObject(objInfo.Package.Dir, objInfo.QName, obj)
+	if err != nil {
+		return err
+	}
+
+	log.DbgLogger4.Println("object local path:", f)
+
+	if new {
+		result = pullNew
+	} else {
+		result = pullOK
 	}
 
 	return nil

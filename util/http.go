@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -150,6 +151,21 @@ func GetObjectClasses(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUser
 	return s, nil
 }
 
+// GetObject returns a domain object of a given class and name
+func GetObject(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain, class, name string) (interface{}, error) {
+	u, err := AbsoluteMgmtURL(dpRestMgmtURL, "/mgmt/config/%s/%s/%s", domain, class, name)
+	if err != nil {
+		return nil, err
+	}
+
+	rsBody, err := DoHTTPRequest(httpClient, "GET", u, dpUserName, dpUserPassword, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return JSONValue(rsBody, class), nil
+}
+
 // GetObjects returns all domain objects of a given class
 func GetObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain, class string) ([]interface{}, error) {
 	u, err := AbsoluteMgmtURL(dpRestMgmtURL, "/mgmt/config/%s/%s", domain, class)
@@ -215,6 +231,100 @@ func GetFile(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword,
 
 	fd := JSONValue(rsBody, "file").(string)
 	return base64.StdEncoding.DecodeString(fd)
+}
+
+// CreateOrUpdateObject creates a configuration object or updates it if already exist
+func CreateOrUpdateObject(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain, cls string, obj interface{}) (interface{}, error) {
+	u, err := AbsoluteMgmtURL(dpRestMgmtURL, "/mgmt/config/%s/%s/%s", domain, cls, JSONValue(obj, "name").(string))
+	if err != nil {
+		return nil, err
+	}
+
+	m := make(map[string]interface{})
+	m[cls] = obj
+
+	rsBody, err := DoHTTPRequest(httpClient, "PUT", u, dpUserName, dpUserPassword, m)
+	if err != nil {
+		return nil, err
+	}
+
+	return rsBody, nil
+}
+
+// IsDirectory checks if a directory exist
+func IsDirectory(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain, path string) (bool, error) {
+	u, err := AbsoluteMgmtURL(dpRestMgmtURL, "/mgmt/filestore/%s/%s", domain, path)
+	if err != nil {
+		return false, err
+	}
+
+	_, err = DoHTTPRequest(httpClient, "GET", u, dpUserName, dpUserPassword, nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "404 Not Found") {
+			return false, nil
+		} else {
+			return false, err
+		}
+	}
+
+	return true, nil
+}
+
+// CreateDirectories recursively creates directories
+func CreateDirectories(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain, path string) error {
+	ok, err := IsDirectory(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, path)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+
+	if err := CreateDirectories(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, filepath.Dir(path)); err != nil {
+		return err
+	}
+
+	u, err := AbsoluteMgmtURL(dpRestMgmtURL, "/mgmt/filestore/%s/%s", domain, path)
+	if err != nil {
+		return err
+	}
+
+	m := make(map[string]interface{})
+	d := make(map[string]interface{})
+	m["directory"] = d
+	d["name"] = filepath.Base(path)
+
+	_, err = DoHTTPRequest(httpClient, "PUT", u, dpUserName, dpUserPassword, m)
+	if err != nil && !strings.Contains(err.Error(), "409 Conflict") {
+		return err
+	}
+
+	return nil
+}
+
+// CreateOrUpdateFile creates or updates a file with the given data
+func CreateOrUpdateFile(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain, path string, data []byte) (interface{}, error) {
+	if err := CreateDirectories(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+
+	u, err := AbsoluteMgmtURL(dpRestMgmtURL, "/mgmt/filestore/%s/%s", domain, path)
+	if err != nil {
+		return nil, err
+	}
+
+	m := make(map[string]interface{})
+	f := make(map[string]interface{})
+	m["file"] = f
+	f["name"] = filepath.Base(path)
+	f["content"] = base64.StdEncoding.EncodeToString(data)
+
+	rsBody, err := DoHTTPRequest(httpClient, "PUT", u, dpUserName, dpUserPassword, m)
+	if err != nil {
+		return rsBody, err
+	}
+
+	return rsBody, nil
 }
 
 // WalkDirFunc is the type of the function called for each directory visited by Walk
@@ -308,4 +418,19 @@ func lsFileStore(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassw
 	}
 
 	return d, f, nil
+}
+
+// GetStatus returns the status information from a given provider
+func GetStatus(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain, statusProvider string) (interface{}, error) {
+	u, err := AbsoluteMgmtURL(dpRestMgmtURL, "/mgmt/status/%s/%s", domain, statusProvider)
+	if err != nil {
+		return nil, err
+	}
+
+	rsBody, err := DoHTTPRequest(httpClient, "GET", u, dpUserName, dpUserPassword, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return rsBody, nil
 }

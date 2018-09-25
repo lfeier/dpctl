@@ -16,6 +16,7 @@ package main
 
 import (
 	"os"
+	"time"
 
 	"github.com/lfeier/dpctl/cmd"
 	"github.com/lfeier/dpctl/log"
@@ -28,6 +29,10 @@ func main() {
 			os.Exit(2)
 		}
 	}()
+
+	defer func(start time.Time) {
+		log.DbgLogger1.Printf("Total time: %v", time.Since(start))
+	}(time.Now())
 
 	if err := cmd.CmdRoot.Execute(); err != nil {
 		log.ErrLogger.Println(err.Error())
