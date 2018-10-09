@@ -207,7 +207,7 @@ func pushFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswor
 
 	logFn := func(fileInfo *util.FileInfo, result *pushResult, start time.Time) {
 		elapsed := time.Since(start)
-		lf := fmt.Sprintf("FILE: %%-%ds [%%s] %%%ds [%%s]", maxPathLength, maxPkgLength + maxPushResultLength - len(fileInfo.Package.Name))
+		lf := fmt.Sprintf("FILE: %%-%ds [%%s] %%%ds [%%s]", maxPathLength, maxPkgLength+maxPushResultLength-len(fileInfo.Package.Name))
 		log.OutLogger.Printf(lf, fileInfo.Path, fileInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
 
@@ -282,7 +282,7 @@ func pushObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassw
 
 	logFn := func(objInfo *util.ObjectInfo, result *pushResult, start time.Time) {
 		elapsed := time.Since(start)
-		lf := fmt.Sprintf("OBJECT: %%-%ds [%%s] %%%ds [%%s]", maxQNameLength, maxPkgLength + maxPushResultLength - len(objInfo.Package.Name))
+		lf := fmt.Sprintf("OBJECT: %%-%ds [%%s] %%%ds [%%s]", maxQNameLength, maxPkgLength+maxPushResultLength-len(objInfo.Package.Name))
 		log.OutLogger.Printf(lf, objInfo.QName, objInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
 
@@ -317,15 +317,27 @@ func pushObject(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswo
 
 	res, err := util.CreateOrUpdateObject(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, objInfo.Class, obj)
 	if err != nil {
+		errors := util.JSONValue(res, "error")
+		if errors != nil {
+			return fmt.Errorf("%s\n       %v", err.Error(), errors)
+		}
+
 		return err
 	}
 
-	resStr := util.JSONValue(res, objInfo.Name).(string)
+	resVal := util.JSONValue(res, objInfo.Name)
+	if resVal == nil {
+		resVal = util.JSONValue(res, strings.Replace(objInfo.Name, " ", "_", -1))
+	}
+
+	if resVal == nil {
+		return fmt.Errorf("unknown push result")
+	}
 
 	switch {
-	case strings.Contains(resStr, "Configuration was updated"):
+	case strings.Contains(resVal.(string), "Configuration was updated"):
 		result = pushOK
-	case strings.Contains(resStr, "Configuration was created"):
+	case strings.Contains(resVal.(string), "Configuration was created"):
 		result = pushNew
 	default:
 		result = pushSuccess

@@ -359,8 +359,17 @@ func pullObject(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswo
 	defer logFn(objInfo, &result, time.Now())
 
 	obj, err := util.GetObject(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, objInfo.Class, objInfo.Name)
+	if err != nil && strings.Contains(err.Error(), "HTTP response error: 404 Not Found") {
+		obj, err = util.GetSingletonObject(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, objInfo.Class)
+	}
 	if err != nil {
 		return err
+	}
+
+	name := util.JSONValue(obj, "name").(string)
+	if objInfo.Name != name {
+		objInfo.Name = name
+		objInfo.QName = util.ObjectQName(objInfo.Class, objInfo.Name)
 	}
 
 	deleteLinks(obj.(util.GenericMap))
@@ -392,8 +401,15 @@ func deleteLinks(o util.GenericMap) {
 			continue
 		}
 
-		if reflect.TypeOf(v).Kind() == reflect.Map {
+		switch reflect.ValueOf(v).Kind() {
+		case reflect.Map:
 			deleteLinks(v.(util.GenericMap))
+		case reflect.Slice:
+			for _, sv := range v.([]interface{}) {
+				if reflect.ValueOf(sv).Kind() == reflect.Map {
+					deleteLinks(sv.(util.GenericMap))
+				}
+			}
 		}
 	}
 }

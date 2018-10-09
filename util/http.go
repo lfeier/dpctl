@@ -160,10 +160,30 @@ func GetObject(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswor
 
 	rsBody, err := DoHTTPRequest(httpClient, "GET", u, dpUserName, dpUserPassword, nil)
 	if err != nil {
-		return nil, err
+		return rsBody, err
 	}
 
 	return JSONValue(rsBody, class), nil
+}
+
+// GetSingletonObject returns a singleton domain object of a given class
+func GetSingletonObject(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain, class string) (interface{}, error) {
+	u, err := AbsoluteMgmtURL(dpRestMgmtURL, "/mgmt/config/%s/%s", domain, class)
+	if err != nil {
+		return nil, err
+	}
+
+	rsBody, err := DoHTTPRequest(httpClient, "GET", u, dpUserName, dpUserPassword, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	obj := JSONValue(rsBody, class)
+	if reflect.ValueOf(obj).Kind() != reflect.Map {
+		return rsBody, fmt.Errorf("not a singleton object: %s", class)
+	}
+
+	return obj, nil
 }
 
 // GetObjects returns all domain objects of a given class
@@ -245,7 +265,7 @@ func CreateOrUpdateObject(httpClient *http.Client, dpRestMgmtURL, dpUserName, dp
 
 	rsBody, err := DoHTTPRequest(httpClient, "PUT", u, dpUserName, dpUserPassword, m)
 	if err != nil {
-		return nil, err
+		return rsBody, err
 	}
 
 	return rsBody, nil
