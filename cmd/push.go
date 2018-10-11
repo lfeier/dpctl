@@ -15,17 +15,20 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/lfeier/dpctl/log"
 	"github.com/lfeier/dpctl/util"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/semaphore"
 )
 
 func init() {
@@ -51,6 +54,7 @@ func init() {
 	addFilesFlag(scmd)
 	addIgnoreObjectsFlag(scmd)
 	addIgnoreFilesFlag(scmd)
+	addParallelFlag(scmd)
 }
 
 func preRunPush(cmd *cobra.Command, args []string) {
@@ -98,6 +102,9 @@ func runPushE(cmd *cobra.Command, args []string) error {
 	ignoreFiles, _ := getIgnoreFilesFlagValue(cmd)
 	log.DbgLogger1.Printf("--ignore-files=%v", ignoreFiles)
 
+	parallel, _ := getParallelFlagValue(cmd)
+	log.DbgLogger1.Printf("--parallel=%v", parallel)
+
 	reObjects := regexp.MustCompile(strings.Join(objects, "|"))
 	log.DbgLogger4.Println("objects regexp:", reObjects.String())
 
@@ -132,9 +139,11 @@ func runPushE(cmd *cobra.Command, args []string) error {
 
 	httpClient := util.CreateHTTPClient(httpTimeout)
 
-	err1 := pushFiles(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reFiles, reIgnoreFiles, pkgs)
+	sem := semaphore.NewWeighted(int64(parallel))
 
-	err2 := pushObjects(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reObjects, reIgnoreObjects, pkgs)
+	err1 := pushFiles(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reFiles, reIgnoreFiles, pkgs, sem, int64(parallel))
+
+	err2 := pushObjects(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reObjects, reIgnoreObjects, pkgs, sem, int64(parallel))
 
 	if err1 != nil && err2 != nil {
 		return fmt.Errorf("%s, %s", err1.Error(), err2.Error())
@@ -178,7 +187,7 @@ var maxPushResultLength = 7
 type logPushFile func(fileInfo *util.FileInfo, result *pushResult, start time.Time)
 type logPushObject func(objectInfo *util.ObjectInfo, result *pushResult, start time.Time)
 
-func pushFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, reFiles, reIgnoreFiles *regexp.Regexp, pkgs util.PackageSlice) error {
+func pushFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, reFiles, reIgnoreFiles *regexp.Regexp, pkgs util.PackageSlice, sem *semaphore.Weighted, n int64) error {
 	files, err := util.GetProjectFiles(pkgs)
 	if err != nil {
 		return err
@@ -211,16 +220,28 @@ func pushFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswor
 		log.OutLogger.Printf(lf, fileInfo.Path, fileInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
 
-	errCount := 0
+	ctx := context.TODO()
+	var errCount uint64
+
 	for _, fileInfo := range matchingFiles {
-		if err := pushFile(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, fileInfo, logFn); err != nil {
-			log.ErrLogger.Println("Error:", err.Error())
-			errCount++
+		if err := sem.Acquire(ctx, 1); err != nil {
+			return err
 		}
+
+		go func(fileInfo *util.FileInfo) {
+			defer sem.Release(1)
+			if err := pushFile(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, fileInfo, logFn); err != nil {
+				log.ErrLogger.Println("Error:", err.Error())
+				atomic.AddUint64(&errCount, 1)
+			}
+		}(fileInfo)
 	}
 
-	if errCount > 0 {
-		return fmt.Errorf("failed to push %d files", errCount)
+	pushWait(ctx, sem, n)
+
+	errCountFinal := atomic.LoadUint64(&errCount)
+	if errCountFinal > 0 {
+		return fmt.Errorf("failed to push %v files", errCountFinal)
 	}
 
 	return nil
@@ -253,7 +274,7 @@ func pushFile(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword
 	return nil
 }
 
-func pushObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, reObjects, reIgnoreObjects *regexp.Regexp, pkgs util.PackageSlice) error {
+func pushObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, reObjects, reIgnoreObjects *regexp.Regexp, pkgs util.PackageSlice, sem *semaphore.Weighted, n int64) error {
 	objects, err := util.GetProjectObjects(pkgs)
 	if err != nil {
 		return err
@@ -286,16 +307,29 @@ func pushObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassw
 		log.OutLogger.Printf(lf, objInfo.QName, objInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
 
-	errCount := 0
+	ctx := context.TODO()
+	var errCount uint64
+
 	for _, objInfo := range matchingObjects {
-		if err := pushObject(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, objInfo, logFn); err != nil {
-			log.ErrLogger.Println("Error:", err.Error())
-			errCount++
+		if err := sem.Acquire(ctx, 1); err != nil {
+			return err
 		}
+
+		go func(objInfo *util.ObjectInfo) {
+			defer sem.Release(1)
+
+			if err := pushObject(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, objInfo, logFn); err != nil {
+				log.ErrLogger.Println("Error:", err.Error())
+				atomic.AddUint64(&errCount, 1)
+			}
+		}(objInfo)
 	}
 
-	if errCount > 0 {
-		return fmt.Errorf("failed to push %d objects", errCount)
+	pushWait(ctx, sem, n)
+
+	errCountFinal := atomic.LoadUint64(&errCount)
+	if errCountFinal > 0 {
+		return fmt.Errorf("failed to push %v objects", errCountFinal)
 	}
 
 	return nil
@@ -357,4 +391,13 @@ func validateObjectName(name string, obj interface{}) error {
 	}
 
 	return nil
+}
+
+func pushWait(ctx context.Context, sem *semaphore.Weighted, n int64) {
+	if err := sem.Acquire(ctx, n); err != nil {
+		log.ErrLogger.Println("Error:", err.Error())
+		return
+	}
+
+	defer sem.Release(n)
 }

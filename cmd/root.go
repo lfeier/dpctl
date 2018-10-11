@@ -78,6 +78,10 @@ func addIgnoreFilesFlag(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("ignore-files", []string{"^(chkpoints/.*|config/.*|export/.*|image/.*|logstore/.*|logtemp/.*|policyframework/.*|pubcert/.*|sharedcert/.*|store/.*|tasktemplates/.*|temporary/.*)$"}, "ignore files regex filter")
 }
 
+func addParallelFlag(cmd *cobra.Command) {
+	cmd.Flags().Int("parallel", 1, "allow parallel execution")
+}
+
 func getVerboseFlagValue(cmd *cobra.Command) (int, error) {
 	return cmd.Flags().GetCount("verbose")
 }
@@ -124,4 +128,8 @@ func getIgnoreObjectsFlagValue(cmd *cobra.Command) ([]string, error) {
 
 func getIgnoreFilesFlagValue(cmd *cobra.Command) ([]string, error) {
 	return cmd.Flags().GetStringSlice("ignore-files")
+}
+
+func getParallelFlagValue(cmd *cobra.Command) (int, error) {
+	return cmd.Flags().GetInt("parallel")
 }

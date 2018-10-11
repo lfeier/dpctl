@@ -15,17 +15,20 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/lfeier/dpctl/log"
 	"github.com/lfeier/dpctl/util"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/semaphore"
 )
 
 func init() {
@@ -51,6 +54,7 @@ func init() {
 	addFilesFlag(scmd)
 	addIgnoreObjectsFlag(scmd)
 	addIgnoreFilesFlag(scmd)
+	addParallelFlag(scmd)
 }
 
 func preRunPull(cmd *cobra.Command, args []string) {
@@ -98,6 +102,9 @@ func runPullE(cmd *cobra.Command, args []string) error {
 	ignoreFiles, _ := getIgnoreFilesFlagValue(cmd)
 	log.DbgLogger1.Printf("--ignore-files=%v", ignoreFiles)
 
+	parallel, _ := getParallelFlagValue(cmd)
+	log.DbgLogger1.Printf("--parallel=%v", parallel)
+
 	reObjects := regexp.MustCompile(strings.Join(objects, "|"))
 	log.DbgLogger4.Println("objects regexp:", reObjects.String())
 
@@ -132,9 +139,11 @@ func runPullE(cmd *cobra.Command, args []string) error {
 
 	httpClient := util.CreateHTTPClient(httpTimeout)
 
-	err1 := pullFiles(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reFiles, reIgnoreFiles, pkgs)
+	sem := semaphore.NewWeighted(int64(parallel))
 
-	err2 := pullObjects(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reObjects, reIgnoreObjects, pkgs)
+	err1 := pullFiles(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reFiles, reIgnoreFiles, pkgs, sem, int64(parallel))
+
+	err2 := pullObjects(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, reObjects, reIgnoreObjects, pkgs, sem, int64(parallel))
 
 	if err1 != nil && err2 != nil {
 		return fmt.Errorf("%s, %s", err1.Error(), err2.Error())
@@ -178,7 +187,7 @@ var maxPullResultLength = 7
 type logPullFile func(fileInfo *util.FileInfo, result *pullResult, start time.Time)
 type logPullObject func(objectInfo *util.ObjectInfo, result *pullResult, start time.Time)
 
-func pullFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, reFiles, reIgnoreFiles *regexp.Regexp, pkgs util.PackageSlice) error {
+func pullFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, reFiles, reIgnoreFiles *regexp.Regexp, pkgs util.PackageSlice, sem *semaphore.Weighted, n int64) error {
 	walkDir := func(path string) error {
 		if reIgnoreFiles.MatchString(path) || reIgnoreFiles.MatchString(fmt.Sprintf("%s/", path)) {
 			log.DbgLogger2.Println("directory ignored:", path)
@@ -247,16 +256,29 @@ func pullFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswor
 		log.OutLogger.Printf(lf, fileInfo.Path, fileInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
 
-	errCount := 0
+	ctx := context.TODO()
+	var errCount uint64
+
 	for _, fileInfo := range files {
-		if err := pullFile(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, fileInfo, logFn); err != nil {
-			log.ErrLogger.Println("Error:", err.Error())
-			errCount++
+		if err := sem.Acquire(ctx, 1); err != nil {
+			return err
 		}
+
+		go func(fileInfo *util.FileInfo) {
+			defer sem.Release(1)
+
+			if err := pullFile(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, fileInfo, logFn); err != nil {
+				log.ErrLogger.Println("Error:", err.Error())
+				atomic.AddUint64(&errCount, 1)
+			}
+		}(fileInfo)
 	}
 
-	if errCount > 0 {
-		return fmt.Errorf("failed to pull %d files", errCount)
+	pullWait(ctx, sem, n)
+
+	errCountFinal := atomic.LoadUint64(&errCount)
+	if errCountFinal > 0 {
+		return fmt.Errorf("failed to pull %v files", errCountFinal)
 	}
 
 	return nil
@@ -287,7 +309,7 @@ func pullFile(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword
 	return nil
 }
 
-func pullObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, reObjects, reIgnoreObjects *regexp.Regexp, pkgs util.PackageSlice) error {
+func pullObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword, domain string, reObjects, reIgnoreObjects *regexp.Regexp, pkgs util.PackageSlice, sem *semaphore.Weighted, n int64) error {
 	res, err := util.GetStatus(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, "ObjectStatus")
 	if err != nil {
 		return err
@@ -339,16 +361,29 @@ func pullObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassw
 		log.OutLogger.Printf(lf, objInfo.QName, objInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
 
-	errCount := 0
+	ctx := context.TODO()
+	var errCount uint64
+
 	for _, objInfo := range objects {
-		if err := pullObject(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, objInfo, logFn); err != nil {
-			log.ErrLogger.Println("Error:", err.Error())
-			errCount++
+		if err := sem.Acquire(ctx, 1); err != nil {
+			return err
 		}
+
+		go func(objInfo *util.ObjectInfo) {
+			defer sem.Release(1)
+
+			if err := pullObject(httpClient, dpRestMgmtURL, dpUserName, dpUserPassword, domain, objInfo, logFn); err != nil {
+				log.ErrLogger.Println("Error:", err.Error())
+				atomic.AddUint64(&errCount, 1)
+			}
+		}(objInfo)
 	}
 
-	if errCount > 0 {
-		return fmt.Errorf("failed to pull %d objects", errCount)
+	pullWait(ctx, sem, n)
+
+	errCountFinal := atomic.LoadUint64(&errCount)
+	if errCountFinal > 0 {
+		return fmt.Errorf("failed to pull %v objects", errCountFinal)
 	}
 
 	return nil
@@ -412,4 +447,13 @@ func deleteLinks(o util.GenericMap) {
 			}
 		}
 	}
+}
+
+func pullWait(ctx context.Context, sem *semaphore.Weighted, n int64) {
+	if err := sem.Acquire(ctx, n); err != nil {
+		log.ErrLogger.Println("Error:", err.Error())
+		return
+	}
+
+	defer sem.Release(n)
 }
