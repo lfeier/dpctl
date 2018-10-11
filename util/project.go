@@ -20,7 +20,9 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
+	"strings"
 
 	"github.com/lfeier/dpctl/log"
 )
@@ -266,13 +268,50 @@ func SaveFile(pkgDir string, path string, data []byte) (string, bool, error) {
 type ObjectInfo struct {
 	Name    string
 	Class   string
-	QName   string
 	Package *Package
 	File    string
+	data    interface{}
+	depend  []string
+}
+
+// ObjectInfoSlice is a slice of objects
+type ObjectInfoSlice []*ObjectInfo
+
+// QName returns the object qualified name
+func (objInfo *ObjectInfo) QName() string {
+	return ObjectQName(objInfo.Class, objInfo.Name)
+}
+
+// Data returns the object data
+func (objInfo *ObjectInfo) Data() (interface{}, error) {
+	if objInfo.data != nil {
+		return objInfo.data, nil
+	}
+
+	var err error
+	objInfo.data, err = ReadDataFromFile(objInfo.File)
+
+	return objInfo.data, err
+}
+
+// Depend returns the object dependencies
+func (objInfo *ObjectInfo) Depend() ([]string, error) {
+	if objInfo.depend != nil {
+		return objInfo.depend, nil
+	}
+
+	obj, err := objInfo.Data()
+	if err != nil {
+		return nil, err
+	}
+
+	objInfo.depend = Depend(obj)
+
+	return objInfo.depend, nil
 }
 
 // GetProjectObjects returns the project objects for the selected packages
-func GetProjectObjects(pkgs PackageSlice) ([]*ObjectInfo, error) {
+func GetProjectObjects(pkgs PackageSlice) (ObjectInfoSlice, error) {
 	pkgs.Sort()
 
 	m := make(map[string]*ObjectInfo)
@@ -322,12 +361,12 @@ func GetProjectObjects(pkgs PackageSlice) ([]*ObjectInfo, error) {
 			File:    path,
 		}
 
-		objInfo.QName = ObjectQName(objInfo.Class, objInfo.Name)
+		qn := objInfo.QName()
 
-		if _, ok := m[objInfo.QName]; !ok {
-			m[objInfo.QName] = objInfo
+		if _, ok := m[qn]; !ok {
+			m[qn] = objInfo
 		} else {
-			log.DbgLogger4.Printf("package object ignored: %s [%s]", objInfo.QName, objInfo.Package.Name)
+			log.DbgLogger4.Printf("package object ignored: %s [%s]", qn, objInfo.Package.Name)
 		}
 
 		return nil
@@ -349,7 +388,7 @@ func GetProjectObjects(pkgs PackageSlice) ([]*ObjectInfo, error) {
 		}
 	}
 
-	objects := make([]*ObjectInfo, 0, len(m))
+	objects := make(ObjectInfoSlice, 0, len(m))
 
 	for _, objInfo := range m {
 		objects = append(objects, objInfo)
@@ -363,10 +402,24 @@ type FileInfo struct {
 	Path    string
 	Package *Package
 	File    string
+	data    []byte
+}
+
+// FileInfoSlice is a slice of files
+type FileInfoSlice []*FileInfo
+
+// Data returns the file data
+func (fileInfo *FileInfo) Data() ([]byte, error) {
+	var err error
+	if fileInfo.data == nil {
+		fileInfo.data, err = ioutil.ReadFile(fileInfo.File)
+	}
+
+	return fileInfo.data, err
 }
 
 // GetProjectFiles returns the project files for the selected packages
-func GetProjectFiles(pkgs PackageSlice) ([]*FileInfo, error) {
+func GetProjectFiles(pkgs PackageSlice) (FileInfoSlice, error) {
 	pkgs.Sort()
 
 	m := make(map[string]*FileInfo)
@@ -432,7 +485,7 @@ func GetProjectFiles(pkgs PackageSlice) ([]*FileInfo, error) {
 		}
 	}
 
-	files := make([]*FileInfo, 0, len(m))
+	files := make(FileInfoSlice, 0, len(m))
 
 	for _, fileInfo := range m {
 		files = append(files, fileInfo)
@@ -450,4 +503,125 @@ func IsHidden(path string) bool {
 	// TODO: Update to handle hidden Windows files and directories
 
 	return false
+}
+
+// Depend returns object dependencies
+func Depend(obj interface{}) []string {
+	dep := make([]string, 0, 0)
+
+	for _, v := range obj.(GenericMap) {
+		switch reflect.ValueOf(v).Kind() {
+		case reflect.Map:
+			o := v.(GenericMap)
+			if qn, ok := RefQName(o); ok {
+				dep = append(dep, qn)
+			} else {
+				dep = append(dep, Depend(o)...)
+			}
+		case reflect.Slice:
+			for _, sv := range v.([]interface{}) {
+				if reflect.ValueOf(sv).Kind() == reflect.Map {
+					o := sv.(GenericMap)
+					if qn, ok := RefQName(o); ok {
+						dep = append(dep, qn)
+					} else {
+						dep = append(dep, Depend(o)...)
+					}
+				}
+			}
+		}
+	}
+
+	return dep
+}
+
+// RefQName returns the reference object QName
+func RefQName(m GenericMap) (string, bool) {
+	if len(m) != 2 {
+		return "", false
+	}
+
+	href, ok := m["href"]
+	if !ok {
+		return "", false
+	}
+
+	val, ok := m["value"]
+	if !ok {
+		return "", false
+	}
+
+	hrefs := href.(string)
+	vals := val.(string)
+
+	s := strings.Split(hrefs, "/")
+	if len(s) != 6 {
+		return "", false
+	}
+
+	if s[5] != vals {
+		log.ErrLogger.Printf("Error: href and value do not match: %s, %s", hrefs, vals)
+		return "", false
+	}
+
+	return fmt.Sprintf("%s/%s", s[4], vals), true
+}
+
+// Len returns the number of elements in the collection
+func (s ObjectInfoSlice) Len() int {
+	return len(s)
+}
+
+// Less reports whether the element with
+// index i should sort before the element with index j.
+func (s ObjectInfoSlice) Less(i, j int) bool {
+	jdepend, err := s[j].Depend()
+	if err != nil {
+		return false
+	}
+
+	iqn := s[i].QName()
+	for _, qn := range jdepend {
+		if qn == iqn {
+			return true
+		}
+	}
+
+	idepend, err := s[i].Depend()
+	if err != nil {
+		return false
+	}
+
+	jqn := s[j].QName()
+	for _, qn := range idepend {
+		if qn == jqn {
+			return false
+		}
+	}
+
+	if len(idepend) == 0 && len(jdepend) == 0 {
+		return strings.Compare(iqn, jqn) <= 0
+	}
+
+	if len(idepend) == 0 {
+		return true
+	}
+
+	if len(jdepend) == 0 {
+		return false
+	}
+
+	return strings.Compare(iqn, jqn) <= 0
+}
+
+// Swap swaps the elements with indexes i and j.
+func (s ObjectInfoSlice) Swap(i, j int) {
+	t := s[i]
+	s[i] = s[j]
+	s[j] = t
+}
+
+// Sort is a convenience method.
+func (s ObjectInfoSlice) Sort() {
+	sort.Sort(s)
 }

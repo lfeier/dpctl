@@ -197,7 +197,7 @@ func pullFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswor
 		return nil
 	}
 
-	var files []*util.FileInfo
+	var files util.FileInfoSlice
 	maxPathLength := 0
 	maxPkgLength := 0
 	walkFile := func(path string, modified string, size uint) error {
@@ -317,7 +317,7 @@ func pullObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassw
 		return err
 	}
 
-	var objects []*util.ObjectInfo
+	var objects util.ObjectInfoSlice
 	maxQNameLength := 0
 	maxPkgLength := 0
 	for _, objStatus := range util.JSONValue(res, "ObjectStatus").([]interface{}) {
@@ -342,7 +342,6 @@ func pullObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassw
 		objInfo := &util.ObjectInfo{
 			Name:    name,
 			Class:   cls,
-			QName:   qn,
 			Package: pkg,
 		}
 
@@ -360,7 +359,7 @@ func pullObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassw
 	logFn := func(objInfo *util.ObjectInfo, result *pullResult, start time.Time) {
 		elapsed := time.Since(start)
 		lf := fmt.Sprintf("OBJECT: %%-%ds [%%s] %%%ds [%%s]", maxQNameLength, maxPkgLength+maxPullResultLength-len(objInfo.Package.Name))
-		log.OutLogger.Printf(lf, objInfo.QName, objInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
+		log.OutLogger.Printf(lf, objInfo.QName(), objInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
 
 	log.DbgLogger1.Printf("objects selected: %d", len(objects))
@@ -408,12 +407,11 @@ func pullObject(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswo
 	name := util.JSONValue(obj, "name").(string)
 	if objInfo.Name != name {
 		objInfo.Name = name
-		objInfo.QName = util.ObjectQName(objInfo.Class, objInfo.Name)
 	}
 
-	deleteLinks(obj.(util.GenericMap))
+	updateLinks(obj.(util.GenericMap), domain)
 
-	f, new, err := util.SaveObject(objInfo.Package.Dir, objInfo.QName, obj)
+	f, new, err := util.SaveObject(objInfo.Package.Dir, objInfo.QName(), obj)
 	if err != nil {
 		return err
 	}
@@ -429,24 +427,24 @@ func pullObject(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswo
 	return nil
 }
 
-func deleteLinks(o util.GenericMap) {
+func updateLinks(o util.GenericMap, domain string) {
 	for k, v := range o {
 		switch k {
 		case "_links":
 			delete(o, k)
 			continue
 		case "href":
-			delete(o, k)
+			o[k] = strings.Replace(v.(string), fmt.Sprintf("/mgmt/config/%s/", domain), "/mgmt/config/{domain}/", 1)
 			continue
 		}
 
 		switch reflect.ValueOf(v).Kind() {
 		case reflect.Map:
-			deleteLinks(v.(util.GenericMap))
+			updateLinks(v.(util.GenericMap), domain)
 		case reflect.Slice:
 			for _, sv := range v.([]interface{}) {
 				if reflect.ValueOf(sv).Kind() == reflect.Map {
-					deleteLinks(sv.(util.GenericMap))
+					updateLinks(sv.(util.GenericMap), domain)
 				}
 			}
 		}

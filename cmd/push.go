@@ -18,8 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net/http"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -253,7 +253,7 @@ func pushFile(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassword
 	result := pushError
 	defer logFn(fileInfo, &result, time.Now())
 
-	data, err := ioutil.ReadFile(fileInfo.File)
+	data, err := fileInfo.Data()
 	if err != nil {
 		return err
 	}
@@ -285,14 +285,16 @@ func pushObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassw
 	matchingObjects := objects[:0]
 	maxQNameLength := 0
 	for _, objInfo := range objects {
-		if !reObjects.MatchString(objInfo.QName) || reIgnoreObjects.MatchString(objInfo.QName) {
+		qn := objInfo.QName()
+
+		if !reObjects.MatchString(qn) || reIgnoreObjects.MatchString(qn) {
 			log.DbgLogger2.Println("object ignored:", objInfo.QName)
 			continue
 		}
 
 		matchingObjects = append(matchingObjects, objInfo)
-		if maxQNameLength < len(objInfo.QName) {
-			maxQNameLength = len(objInfo.QName)
+		if maxQNameLength < len(qn) {
+			maxQNameLength = len(qn)
 		}
 	}
 
@@ -306,10 +308,12 @@ func pushObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassw
 	logFn := func(objInfo *util.ObjectInfo, result *pushResult, start time.Time) {
 		elapsed := time.Since(start)
 		lf := fmt.Sprintf("OBJECT: %%-%ds [%%s] %%%ds [%%s]", maxQNameLength, maxPkgLength+maxPushResultLength-len(objInfo.Package.Name))
-		log.OutLogger.Printf(lf, objInfo.QName, objInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
+		log.OutLogger.Printf(lf, objInfo.QName(), objInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
 
 	log.DbgLogger1.Printf("objects selected: %d", len(matchingObjects))
+
+	matchingObjects.Sort()
 
 	ctx := context.TODO()
 	var errCount uint64
@@ -343,10 +347,12 @@ func pushObject(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswo
 	result := pushError
 	defer logFn(objInfo, &result, time.Now())
 
-	obj, err := util.ReadDataFromFile(objInfo.File)
+	obj, err := objInfo.Data()
 	if err != nil {
 		return err
 	}
+
+	deleteLinks(obj.(util.GenericMap))
 
 	err = validateObjectName(objInfo.Name, obj)
 	if err != nil {
@@ -395,6 +401,30 @@ func validateObjectName(name string, obj interface{}) error {
 	}
 
 	return nil
+}
+
+func deleteLinks(o util.GenericMap) {
+	for k, v := range o {
+		switch k {
+		case "_links":
+			delete(o, k)
+			continue
+		case "href":
+			delete(o, k)
+			continue
+		}
+
+		switch reflect.ValueOf(v).Kind() {
+		case reflect.Map:
+			deleteLinks(v.(util.GenericMap))
+		case reflect.Slice:
+			for _, sv := range v.([]interface{}) {
+				if reflect.ValueOf(sv).Kind() == reflect.Map {
+					deleteLinks(sv.(util.GenericMap))
+				}
+			}
+		}
+	}
 }
 
 func pushWait(ctx context.Context, sem *semaphore.Weighted, n int64) {
