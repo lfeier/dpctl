@@ -220,6 +220,8 @@ func pushFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswor
 		log.OutLogger.Printf(lf, fileInfo.Path, fileInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
 
+	log.DbgLogger1.Printf("files selected: %d", len(matchingFiles))
+
 	ctx := context.TODO()
 	var errCount uint64
 
@@ -306,6 +308,8 @@ func pushObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassw
 		lf := fmt.Sprintf("OBJECT: %%-%ds [%%s] %%%ds [%%s]", maxQNameLength, maxPkgLength+maxPushResultLength-len(objInfo.Package.Name))
 		log.OutLogger.Printf(lf, objInfo.QName, objInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
+
+	log.DbgLogger1.Printf("objects selected: %d", len(matchingObjects))
 
 	ctx := context.TODO()
 	var errCount uint64

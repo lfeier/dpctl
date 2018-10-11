@@ -256,6 +256,8 @@ func pullFiles(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPasswor
 		log.OutLogger.Printf(lf, fileInfo.Path, fileInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
 
+	log.DbgLogger1.Printf("files selected: %d", len(files))
+
 	ctx := context.TODO()
 	var errCount uint64
 
@@ -360,6 +362,8 @@ func pullObjects(httpClient *http.Client, dpRestMgmtURL, dpUserName, dpUserPassw
 		lf := fmt.Sprintf("OBJECT: %%-%ds [%%s] %%%ds [%%s]", maxQNameLength, maxPkgLength+maxPullResultLength-len(objInfo.Package.Name))
 		log.OutLogger.Printf(lf, objInfo.QName, objInfo.Package.Name, result.String(), elapsed.Truncate(time.Millisecond).String())
 	}
+
+	log.DbgLogger1.Printf("objects selected: %d", len(objects))
 
 	ctx := context.TODO()
 	var errCount uint64
