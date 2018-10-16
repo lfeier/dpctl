@@ -567,61 +567,40 @@ func RefQName(m GenericMap) (string, bool) {
 	return fmt.Sprintf("%s/%s", s[4], vals), true
 }
 
-// Len returns the number of elements in the collection
-func (s ObjectInfoSlice) Len() int {
-	return len(s)
-}
-
-// Less reports whether the element with
-// index i should sort before the element with index j.
-func (s ObjectInfoSlice) Less(i, j int) bool {
-	jdepend, err := s[j].Depend()
-	if err != nil {
-		return false
-	}
-
-	iqn := s[i].QName()
-	for _, qn := range jdepend {
-		if qn == iqn {
-			return true
-		}
-	}
-
-	idepend, err := s[i].Depend()
-	if err != nil {
-		return false
-	}
-
-	jqn := s[j].QName()
-	for _, qn := range idepend {
-		if qn == jqn {
-			return false
-		}
-	}
-
-	if len(idepend) == 0 && len(jdepend) == 0 {
-		return strings.Compare(iqn, jqn) <= 0
-	}
-
-	if len(idepend) == 0 {
-		return true
-	}
-
-	if len(jdepend) == 0 {
-		return false
-	}
-
-	return strings.Compare(iqn, jqn) <= 0
-}
-
-// Swap swaps the elements with indexes i and j.
-func (s ObjectInfoSlice) Swap(i, j int) {
-	t := s[i]
-	s[i] = s[j]
-	s[j] = t
-}
-
-// Sort is a convenience method.
+// Sort reorder the objects based on their dependencies
 func (s ObjectInfoSlice) Sort() {
-	sort.Sort(s)
+	m := make(map[string]*ObjectInfo)
+	var qns []string
+
+	for _, obj := range s {
+		m[obj.QName()] = obj
+		qns = append(qns, obj.QName())
+	}
+
+	s = s[:0]
+
+	sort.Strings(qns)
+
+	var addObjAndDependFn func(o *ObjectInfo)
+	addObjAndDependFn = func(obj *ObjectInfo) {
+		delete(m, obj.QName())
+
+		if depend, err := obj.Depend(); err == nil {
+			sort.Strings(qns)
+
+			for _, qn := range depend {
+				if o, ok := m[qn]; ok {
+					addObjAndDependFn(o)
+				}
+			}
+		}
+
+		s = append(s, obj)
+	}
+
+	for _, qn := range qns {
+		if obj, ok := m[qn]; ok {
+			addObjAndDependFn(obj)
+		}
+	}
 }
